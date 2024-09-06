@@ -1,0 +1,290 @@
+---
+title: "Bioinformatics Assessment Task-RAYCA"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+# Analysis of Gene Expression and Survival Patterns in BRCA TCGA Dataset
+
+## Introduction
+
+In this analysis, we investigate the relationship between gene expression and survival outcomes across different patient clusters. The analysis involves preprocessing clinical and gene expression data, performing feature selection, clustering, and survival analysis.
+
+
+### Libraries Used
+
+```{r}
+# Load necessary libraries
+library(tidyr) # For data tidying.
+library(readr) # For reading data files.
+library(dplyr) # For data manipulation.
+library(lubridate) # For date and time manipulation (if needed).
+library(ggplot2) # For creating plots and visualizations.
+library(survminer) # For survival analysis visualizations.
+library(survival) # For survival analysis functions.
+library(tibble) # For modern data frames.
+library(factoextra) # For clustering visualization.
+library(coxphf) # For Firth's correction in Cox proportional hazards models.
+```
+
+
+### Data Loading
+
+```{r}
+# Load clinical data
+clinical_data <- read_csv("/Users/shivanimakwana/Downloads/RAYCA/brca_tcga_pan_can_atlas_2018_clinical_data.csv")
+
+# Load gene expression data
+gene_expr_data <- read_csv("/Users/shivanimakwana/Downloads/RAYCA/brca_tcga_pan_can_atlas_2018/data_mrna_seq_v2_rsem_zscores_ref_all_samples.csv")
+```
+
+### Data Preprocessing
+
+```{r}
+# Checking for Duplicates
+# Check for duplicates in Hugo_Symbol column
+duplicated_genes <- gene_expr_data$Hugo_Symbol[duplicated(gene_expr_data$Hugo_Symbol)]
+unique_duplicated_genes <- unique(duplicated_genes)
+unique_duplicated_genes  # Print unique duplicated gene symbols for the report
+
+# Cleaning Gene Expression Data
+# Remove rows with empty Hugo_Symbol and duplicates, and remove the Entrez_Gene_Id column
+cleaned_gene_expr_data <- gene_expr_data %>%
+  filter(!is.na(Hugo_Symbol) & Hugo_Symbol != "") %>%
+  select(-Entrez_Gene_Id) %>%
+  distinct(Hugo_Symbol, .keep_all = TRUE)  # Keep only the first occurrence of each gene
+
+# Set row names to Hugo_Symbol and drop the Hugo_Symbol column
+cleaned_gene_expr_data <- cleaned_gene_expr_data %>%
+  column_to_rownames("Hugo_Symbol")
+
+# Transpose gene expression data for easier merging with clinical data
+cleaned_gene_expr_data <- as.data.frame(t(cleaned_gene_expr_data))
+
+# Filtering Gene Expression Data
+# Calculate the mean expression for each gene
+mean_expression <- rowMeans(cleaned_gene_expr_data, na.rm = TRUE)
+
+# Set a threshold based on the median expression value
+median_expression <- median(mean_expression, na.rm = TRUE)
+filtered_gene_expr_data <- cleaned_gene_expr_data[, mean_expression > median_expression]
+
+# Verify dimensions of the filtered data
+dim(filtered_gene_expr_data)
+```
+
+### Preparing Clinical Data
+
+```{r}
+# Ensure survival time is numeric and convert survival status to binary (0 = alive, 1 = dead)
+clinical_data <- clinical_data %>%
+  mutate(
+    `Overall Survival (Months)` = as.numeric(`Overall Survival (Months)`),
+    `Overall Survival Status` = ifelse(`Overall Survival Status` == "1:DECEASED", 1, 0)
+  )
+
+# Select relevant columns using the base R commands
+cols_to_keep <- c("Sample ID", "Overall Survival (Months)", "Overall Survival Status")
+survival_data <- clinical_data[, cols_to_keep]
+survival_data <- survival_data[complete.cases(survival_data), ]
+names(survival_data)[names(survival_data) == "Overall Survival (Months)"] <- "time"
+names(survival_data)[names(survival_data) == "Overall Survival Status"] <- "status"
+survival_data <- survival_data[order(survival_data$`Sample ID`), ]
+
+# Aligning Datasets
+# Identify missing sample IDs
+missing_samples <- setdiff(survival_data$`Sample ID`, rownames(filtered_gene_expr_data))
+if (length(missing_samples) > 0) {
+  cat("Missing sample IDs in filtered_gene_expr_data:\n")
+  print(missing_samples)
+}
+
+# Ensure all datasets use the same set of samples and are properly aligned
+common_samples <- Reduce(intersect, list(
+  survival_data$`Sample ID`,
+  rownames(filtered_gene_expr_data),
+  clinical_data$`Sample ID`
+))
+
+survival_data_filtered <- survival_data %>%
+  filter(`Sample ID` %in% common_samples) %>%
+  arrange(`Sample ID`)
+
+filtered_gene_expr_data <- filtered_gene_expr_data[common_samples, ]
+
+clinical_data <- clinical_data %>%
+  filter(`Sample ID` %in% common_samples) %>%
+  arrange(`Sample ID`)
+
+# Verify alignment
+if (!all(survival_data_filtered$`Sample ID` == rownames(filtered_gene_expr_data) &
+         survival_data_filtered$`Sample ID` == clinical_data$`Sample ID`)) {
+  stop("Sample IDs are not properly aligned across datasets")
+}
+```
+
+### Survival Analysis
+
+```{r}
+# Function to safely compute p-value
+safe_pvalue <- function(gene_expression, time, status) {
+  tryCatch({
+    # Regular Cox model
+    fit <- coxph(Surv(time, status) ~ gene_expression)
+    return(list(p_value = summary(fit)$coefficients[5], method = "Cox"))
+  }, warning = function(w) {
+    tryCatch({
+      # Firth's correction
+      fit <- coxphf(Surv(time, status) ~ gene_expression, maxstep = 50, maxit = 100)
+      return(list(p_value = fit$prob[2], method = "Firth"))
+    }, warning = function(w) {
+      # Log-rank test
+      high_expr <- gene_expression > median(gene_expression, na.rm = TRUE)
+      lr_test <- survdiff(Surv(time, status) ~ high_expr)
+      return(list(p_value = 1 - pchisq(lr_test$chisq, df = 1), method = "LogRank"))
+    }, error = function(e) {
+      return(list(p_value = NA, method = "Error"))
+    })
+  }, error = function(e) {
+    return(list(p_value = NA, method = "Error"))
+  })
+}
+
+
+# Gene Expression Analysis
+# Initialize vectors to store p-values and methods
+p_values <- numeric(ncol(filtered_gene_expr_data))
+methods_used <- character(ncol(filtered_gene_expr_data))
+
+# Iterate over each gene and fit a Cox proportional hazards model
+for (i in 1:ncol(filtered_gene_expr_data)) {
+  gene_expression <- filtered_gene_expr_data[, i]
+  
+  # Remove any infinite or NaN values
+  valid_indices <- !is.infinite(gene_expression) & !is.nan(gene_expression) & 
+                   complete.cases(gene_expression, survival_data_filtered$time, survival_data_filtered$status)
+  
+  if (sum(valid_indices) > 10) {  # Ensure we have enough data points
+    result <- safe_pvalue(gene_expression[valid_indices], 
+                          survival_data_filtered$time[valid_indices], 
+                          survival_data_filtered$status[valid_indices])
+    p_values[i] <- result$p_value
+    methods_used[i] <- result$method
+  } else {
+    p_values[i] <- NA
+    methods_used[i] <- "Insufficient Data"
+  }
+  
+  # Print progress
+  if (i %% 100 == 0) cat("Processed", i, "genes\n")
+}
+
+# Create a data frame with gene names and p-values
+gene_p_values <- data.frame(
+  Gene = colnames(filtered_gene_expr_data),
+  P_value = p_values,
+  Method = methods_used
+)
+
+# Remove rows with NA p-values
+gene_p_values <- gene_p_values[!is.na(gene_p_values$P_value), ]
+
+# Sort genes by p-value
+gene_p_values <- gene_p_values %>%
+  arrange(P_value) %>%
+  head(100)  # Select top 100 genes based on the lowest p-values
+
+# Display the top genes
+head(gene_p_values)
+```
+
+### Clustering
+
+```{r}
+# Filter the gene expression data to include only the top 100 genes
+top_genes <- gene_p_values$Gene
+top_gene_data <- filtered_gene_expr_data[, top_genes]
+
+# Determine the optimal number of clusters using the elbow method
+max_clusters <- 10
+wss <- sapply(1:max_clusters, function(k) {
+  kmeans(top_gene_data, centers = k, nstart = 10)$tot.withinss
+})
+
+# Plot the elbow curve
+plot(1:max_clusters, wss, type = "b", pch = 19, frame = FALSE,
+     xlab = "Number of Clusters (k)", ylab = "Total Within-Cluster Sum of Squares")
+
+# Function to find the elbow point
+find_elbow <- function(x, y) {
+  distances <- sapply(1:length(x), function(i) {
+    point <- c(x[i], y[i])
+    line <- c(x[1] - x[length(x)], y[1] - y[length(y)])
+    abs(point[1] * line[2] - point[2] * line[1] + 
+        y[length(y)] * x[1] - x[length(x)] * y[1]) / 
+      sqrt(sum(line^2))
+  })
+  which.max(distances)
+}
+
+# Find the optimal number of clusters
+optimal_clusters <- find_elbow(1:max_clusters, wss)
+cat("Optimal number of clusters:", optimal_clusters, "\n")
+
+# Perform k-means clustering with the optimal number of clusters
+set.seed(123)  # For reproducibility
+kmeans_result <- kmeans(top_gene_data, centers = optimal_clusters, nstart = 25)
+
+# Add cluster assignment to the survival data
+survival_data_filtered$Cluster <- as.factor(kmeans_result$cluster)
+
+# Visualize the clusters
+fviz_cluster(kmeans_result, data = top_gene_data)
+```
+
+### Survival Analysis by Cluster
+
+```{r}
+# Perform survival analysis within clusters
+fit <- survfit(Surv(time, status) ~ Cluster, data = survival_data_filtered)
+
+# Plot survival curves
+ggsurvplot(fit, data = survival_data_filtered, pval = TRUE, risk.table = TRUE)
+
+# Detailed Survival Analysis for a Selected Gene
+# Pick one of the top 100 genes randomly for detailed survival analysis within clusters
+set.seed(123)  # For reproducibility
+selected_gene <- sample(top_genes, 1)
+
+# Cox Proportional Hazards Model (CoxPH) and Kaplan-Meier Survival Analysis within each cluster
+coxph_results <- list()
+km_results <- list()
+
+for (cluster in levels(survival_data_filtered$Cluster)) {
+  cluster_data <- survival_data_filtered %>% filter(Cluster == cluster)
+  cluster_gene_expr <- filtered_gene_expr_data[rownames(filtered_gene_expr_data) %in% cluster_data$`Sample ID`, selected_gene, drop = FALSE]
+  cluster_data <- cluster_data[match(rownames(cluster_gene_expr), cluster_data$`Sample ID`), ]
+  
+  # Cox Proportional Hazards Model
+  fit <- coxph(Surv(time, status) ~ cluster_gene_expr[, 1], data = cluster_data)
+  coxph_results[[cluster]] <- summary(fit)
+  print(coxph_results[[cluster]])
+  
+  # Kaplan-Meier Survival Analysis
+  median_expr <- median(cluster_gene_expr[, 1], na.rm = TRUE)
+  cluster_data$Expr_Group <- ifelse(cluster_gene_expr[, 1] > median_expr, "High", "Low")
+  
+  fit <- survfit(Surv(time, status) ~ Expr_Group, data = cluster_data)
+  km_results[[cluster]] <- list(fit = fit, log_rank_test = survdiff(Surv(time, status) ~ Expr_Group, data = cluster_data))
+  
+  # Plot Kaplan-Meier survival curves
+  print(ggsurvplot(fit, data = cluster_data, pval = TRUE, risk.table = TRUE, 
+                   title = paste("Cluster", cluster, " - Kaplan-Meier Survival Curve")))
+  
+  # Print log-rank test result
+  print(paste("Cluster", cluster, "Log-rank test p-value:", 
+              1 - pchisq(km_results[[cluster]]$log_rank_test$chisq, df = 1)))
+}
+```
