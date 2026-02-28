@@ -1,5 +1,5 @@
 ---
-title: "Bioinformatics Assessment Task"
+title: "Suvival Analysis"
 output:
   html_document:
     df_print: paged
