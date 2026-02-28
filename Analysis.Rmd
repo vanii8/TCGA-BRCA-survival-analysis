@@ -1,5 +1,5 @@
 ---
-title: "Bioinformatics Assessment Task-RAYCA"
+title: "Bioinformatics Assessment Task"
 output:
   html_document:
     df_print: paged
