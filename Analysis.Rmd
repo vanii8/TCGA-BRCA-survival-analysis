@@ -34,10 +34,10 @@ library(coxphf) # For Firth's correction in Cox proportional hazards models.
 
 ```{r}
 # Load clinical data
-clinical_data <- read_csv("/Users/shivanimakwana/Downloads/RAYCA/brca_tcga_pan_can_atlas_2018_clinical_data.csv")
+clinical_data <- read_csv("/Users/shivanimakwana/Downloads/brca_tcga_pan_can_atlas_2018_clinical_data.csv")
 
 # Load gene expression data
-gene_expr_data <- read_csv("/Users/shivanimakwana/Downloads/RAYCA/brca_tcga_pan_can_atlas_2018/data_mrna_seq_v2_rsem_zscores_ref_all_samples.csv")
+gene_expr_data <- read_csv("/Users/shivanimakwana/Downloads/brca_tcga_pan_can_atlas_2018/data_mrna_seq_v2_rsem_zscores_ref_all_samples.csv")
 ```
 
 ### Data Preprocessing
